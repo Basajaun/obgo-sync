@@ -70,13 +70,21 @@ obgo pull --watch
 
 # Push then keep watching for local changes and remote changes
 obgo push --watch
+
+# Watch flags (can be combined):
+# --watch / -w   bidirectional (local + remote)
+# --wl           watch local changes only (push on write)
+# --wr           watch remote changes only (pull on change)
+# --verbose / -v log each file synced during watch
+# --debug / -d   dump raw CouchDB change events as JSON (implies -v)
+# --silence / -s suppress progress output
 ```
 
 ### Command semantics
 
-**`pull [path]`** treats CouchDB as the source of truth. Without a path every remote document is written to the local vault. Provide a vault-relative file path to pull only that file, or a path ending with `/` to pull an entire folder.
+**`pull [path]`** treats CouchDB as the source of truth. Without a path every remote document is written to the local vault, and files whose remote document is deleted are removed locally. Provide a vault-relative file path to pull only that file, or a path ending with `/` to pull an entire folder.
 
-**`push [path]`** treats the local vault as the source of truth. Without a path all local files are upserted to CouchDB. Provide a file path or a folder path ending with `/` to restrict the operation to that subset.
+**`push [path]`** treats the local vault as the source of truth. Without a path all local files are upserted to CouchDB; files present in CouchDB but absent locally are tombstoned remotely. Provide a file path or a folder path ending with `/` to restrict the operation to that subset.
 
 **`list [path/]`** prints the contents of the remote vault — one file per line with its size and last-modified time. Pass a folder path ending with `/` to filter to that folder.
 

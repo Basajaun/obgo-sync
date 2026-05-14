@@ -18,22 +18,29 @@ obgo pull
      |  (Needed before any decryption can happen)
   |
   5. GET /{db}/_all_docs?include_docs=true
-     |  Filter to type="plain" or "newnote", skip deleted docs
-     |  → []MetaDoc  (each has Path, Children []chunkID, ctime/mtime/size)
+     |  Returns all non-chunk documents, including tombstones
+     |  → []MetaDoc  (each has Path, Children []chunkID, ctime/mtime/size,
+     |                and IsDeleted() true for tombstones)
   |
   6. For each MetaDoc:
      |
-     6a. POST /{db}/_bulk_get  with doc.Children IDs
+     6a. if doc.IsDeleted():
+         |  absPath = resolveCase(dataDir, doc.Path or DecodeDocID(doc.ID))
+         |  suppress.Add(absPath)
+         |  os.Remove(absPath)   ← clean up local file
+         |  continue
+     |
+     6b. POST /{db}/_bulk_get  with doc.Children IDs
          → []ChunkDoc  (each has ID, Data string)
      |
-     6b. Build chunkMap[id] = data
+     6c. Build chunkMap[id] = data
      |
-     6c. For each chunkID in doc.Children (in order):
+     6d. For each chunkID in doc.Children (in order):
          |  [E2EE]  crypto.DecryptContent(data)  →  []byte
          |  [plain] base64.Decode(data)           →  []byte
          |  append to content
      |
-     6d. suppress.Add(absPath)   ← prevent local watcher feedback
+     6e. suppress.Add(absPath)   ← prevent local watcher feedback
          os.MkdirAll(dir, 0755)
          os.WriteFile(absPath, content, 0644)
   |
@@ -67,8 +74,15 @@ obgo push
          |  crypto.SetSalt(salt)
          |  PUT _local/obsidian_livesync_sync_parameters  { "salt": base64(salt) }
   |
-  5. filepath.WalkDir(OBGO_DATA):
-     For each file:
+  5. Enumerate local files: filepath.WalkDir(OBGO_DATA) → localPaths set
+     |
+     Enumerate remote docs: AllMetaDocs → remoteIDs set
+     |
+     For each remote doc whose path has no local file:
+     |  PUT /{db}/{docID} with MetaDoc{ deleted:true, children:nil }
+     |  (app-level tombstone — preserves path for Obsidian sync)
+     |
+     For each local file:
      |
      5a. os.ReadFile(absPath) → content []byte
      |
@@ -103,7 +117,7 @@ If `--watch` is passed, control continues to [Watch mode](#watch-mode) after ste
 
 ## Watch mode
 
-Runs after the initial pull or push. Starts two concurrent goroutines and blocks until the context is cancelled (SIGINT/SIGTERM) or one goroutine returns an error.
+Runs after the initial pull or push. Starts two concurrent goroutines and blocks until the context is cancelled (SIGINT/SIGTERM) or one goroutine returns an error. The `--debug`/`-d` flag (implies `--verbose`/`-v`) prints every raw CouchDB change event as JSON before processing — useful for diagnosing how Obsidian represents deletions.
 
 ```
 svc.Watch(ctx)
@@ -112,11 +126,17 @@ svc.Watch(ctx)
   |                                                       |
   |  Load last seq from <OBGO_DATA>/.obgo_seq             |
   |  GET /{db}/_changes?feed=continuous                   |
+  |       &style=all_docs&conflicts=true                  |
   |       &heartbeat=10000&include_docs=true              |
   |       &since=<lastSeq>                                |
   |                                                       |
+  |  (style=all_docs fires for every leaf revision,       |
+  |   matching PouchDB behaviour so Obsidian deletions    |
+  |   that land as non-winning conflict branches are seen)|
+  |                                                       |
   |  for each ChangeEvent:                                |
-  |    if event.Deleted:                                  |
+  |    if event.Doc.IsDeleted():                          |
+  |      absPath = resolveCase(dataDir, path)             |
   |      suppress.Add(absPath)                            |
   |      os.Remove(absPath)                               |
   |    else:                                              |
@@ -134,11 +154,13 @@ svc.Watch(ctx)
   |  fsnotify.NewWatcher()                                |
   |  Watch OBGO_DATA and all subdirs recursively          |
   |  (hidden dirs like .git are skipped)                  |
+  |  Periodic rescan every 30s adds any new subdirs       |
+  |  that were not yet watched (belt-and-suspenders)      |
   |                                                       |
   |  for each fsnotify event:                             |
   |    skip hidden files and .obgo_seq                    |
   |                                                       |
-  |    Write/Create:                                      |
+  |    Write/Create (file):                               |
   |      if suppress.IsSuppressed(path): skip  <-- loop  |
   |      else: pushFile(ctx, path)              prevention|
   |              → Split → Encrypt → BulkDocs             |
@@ -146,10 +168,16 @@ svc.Watch(ctx)
   |                                                       |
   |    Remove/Rename:                                     |
   |      if suppress.IsSuppressed(path): skip             |
-  |      else: GetMeta → doc.Deleted=true → PutMeta       |
+  |      else: start 500ms debounce timer for path        |
+  |        if Write/Create arrives before timer fires:    |
+  |          cancel timer → treat as update (not delete)  |
+  |        else on timer fire:                            |
+  |          GetMeta → doc.deleted=true → PutMeta         |
+  |          (app-level tombstone, path field preserved)  |
   |                                                       |
   |    Create (directory):                                |
-  |      fw.Add(newDir) to start watching it              |
+  |      recursively add newDir and all its children      |
+  |      to fsnotify watcher                              |
   |                                                       |
   +-------------------------------------------------------+
 

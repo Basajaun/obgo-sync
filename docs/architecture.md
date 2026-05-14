@@ -28,11 +28,11 @@ cmd/obgo
 
 ### `cmd/obgo`
 
-CLI entry point built with [cobra](https://github.com/spf13/cobra). Registers `pull` and `push` sub-commands (both support `--watch`/`-w`). Loads the `.env` file, wires together the config, CouchDB client, crypto service, and sync service, then dispatches to `svc.Pull`, `svc.Push`, and optionally `svc.Watch`. Installs a signal handler (SIGINT/SIGTERM) for graceful shutdown via context cancellation.
+CLI entry point built with [cobra](https://github.com/spf13/cobra). Registers `pull`, `push`, and `list` sub-commands. `pull` and `push` support watch flags: `--watch`/`-w` (bidirectional), `--wl` (local-only), `--wr` (remote-only), `--verbose`/`-v` (per-file logging), `--debug`/`-d` (dump raw change events as JSON, implies `-v`), and `--silence`/`-s` (suppress progress output). Loads the `.env` file (or `--env-file`), wires together the config, CouchDB client, crypto service, and sync service, then dispatches to `svc.Pull`, `svc.Push`, and optionally `svc.Watch`. Installs a signal handler (SIGINT/SIGTERM) for graceful shutdown via context cancellation.
 
 ### `internal/config`
 
-Reads the three required environment variables (`COUCHDB_URL`, `E2EE_PASSWORD`, `OBGO_DATA`) and returns a validated `Config` struct. Returns an error if required variables are missing.
+Reads environment variables (`COUCHDB_URL`, `E2EE_PASSWORD`, `OBGO_DATA`, `OBGO_PATH_OBFUSCATION`) and returns a validated `Config` struct. Returns an error if required variables are missing.
 
 ### `internal/couchdb`
 
@@ -64,19 +64,20 @@ Handles all E2EE operations. When `E2EEPassword` is empty, the service is a tran
 
 Orchestrates the three top-level operations. Holds references to the CouchDB client, crypto service, data directory path, and a `SuppressSet`.
 
-- `Pull(ctx)` — see [`docs/flows.md`](flows.md).
-- `Push(ctx)` — see [`docs/flows.md`](flows.md).
-- `Watch(ctx)` — starts `RemoteWatcher` and `LocalWatcher` as concurrent goroutines and blocks until one returns or the context is cancelled.
-- `applyRemoteDoc` — shared helper used by both `Pull` and the remote watcher callback: fetches chunks via `BulkGet`, assembles, decrypts, and writes to disk.
+- `Pull(ctx)` — see [`docs/flows.md`](flows.md). Removes local files whose remote document is deleted.
+- `Push(ctx)` — see [`docs/flows.md`](flows.md). Tombstones remote docs for files absent locally, using app-level `deleted:true` (not CouchDB `_deleted:true`) so the path field is preserved for Obsidian sync.
+- `Watch(ctx, watchLocal, watchRemote)` — starts `RemoteWatcher` and/or `LocalWatcher` as concurrent goroutines and blocks until one returns or the context is cancelled.
+- `applyRemoteDoc` — shared helper used by both `Pull` and the remote watcher callback: fetches chunks via `BulkGet`, assembles, decrypts, and writes to disk; handles deletion (both lean CouchDB tombstones and app-level `deleted:true`) by removing the local file.
 - `pushFile` — shared helper used by both `Push` and the local watcher callback: reads a file, splits, encrypts, uploads chunks via `BulkDocs`, upserts the meta document.
+- `resolveCase` (`casepath.go`) — case-insensitive path resolution for deletions on case-sensitive Linux filesystems: walks each path component and falls back to a case-insensitive match so `os.Remove` finds the real path regardless of casing differences between the doc ID and the actual filename.
 
 ### `internal/watcher`
 
 Contains two watcher types and the `SuppressSet`.
 
-**`RemoteWatcher`** opens the CouchDB continuous `_changes` feed (via `Client.Changes`) and calls a caller-supplied `onEvent` callback for each `ChangeEvent`. Persists the last seen sequence number to `<dataDir>/.obgo_seq` so that watch mode resumes from the correct position after a restart.
+**`RemoteWatcher`** opens the CouchDB continuous `_changes` feed (via `Client.Changes`) with `style=all_docs&conflicts=true` so that deletions landing as non-winning conflict branches (as Obsidian/PouchDB sometimes produces) are visible. Calls a caller-supplied `onEvent` callback for each `ChangeEvent`. Persists the last seen sequence number to `<dataDir>/.obgo_seq` so that watch mode resumes from the correct position after a restart.
 
-**`LocalWatcher`** uses [fsnotify](https://github.com/fsnotify/fsnotify) to watch the vault directory tree recursively. On `Write`/`Create` events it calls an `onChange` callback; on `Remove`/`Rename` events it calls an `onRemove` callback. Hidden files and directories (dot-prefixed) are skipped. Before invoking callbacks, the watcher checks `SuppressSet.IsSuppressed` to drop events caused by the app's own writes.
+**`LocalWatcher`** uses [fsnotify](https://github.com/fsnotify/fsnotify) to watch the vault directory tree recursively. On `Write`/`Create` (file) events it calls an `onChange` callback. On `Remove`/`Rename` events it starts a 500 ms debounce timer; if a `Write`/`Create` for the same path arrives before the timer fires (atomic-save pattern used by Vim/Neovim), the timer is cancelled and the event is treated as an update rather than a delete. On `Create` (directory) events it recursively registers the new directory tree with fsnotify. A periodic 30 s rescan adds any subdirectories that may have been missed. Hidden files and directories (dot-prefixed) are skipped. Before invoking callbacks, the watcher checks `SuppressSet.IsSuppressed` to drop events caused by the app's own writes.
 
 **`SuppressSet`** is a thread-safe set of recently-written absolute file paths with a 2-second TTL. `Add(path)` records a write; `IsSuppressed(path)` returns true and lazily evicts expired entries. Used to break the remote-write → fsnotify-event → push feedback loop.
 
