@@ -76,10 +76,15 @@ func (s *Service) Push(ctx context.Context, filter string) error {
 			return err
 		}
 		if d.IsDir() {
+			// Skip hidden dirs entirely (.obsidian, .trash, .git, ...). obgo only
+			// syncs notes; hidden files are owned by the Obsidian clients / LiveSync.
+			if name := d.Name(); name != "." && len(name) > 0 && name[0] == '.' {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		// Skip internal state files.
-		if name := filepath.Base(path); len(name) > 5 && name[:5] == ".obgo" {
+		// Skip hidden files and internal state files (.obgo*, dotfiles).
+		if name := filepath.Base(path); len(name) > 0 && name[0] == '.' {
 			return nil
 		}
 		if err := s.pushFile(ctx, path); err != nil {
@@ -102,6 +107,12 @@ func (s *Service) Push(ctx context.Context, filter string) error {
 		if remote.IsDeleted() {
 			continue // already tombstoned
 		}
+		// NEVER tombstone hidden files (.obsidian, .trash, ...). They live only on
+		// disk of the Obsidian clients (LiveSync syncs them client↔client); obgo
+		// doesn't write them locally, so reconcile must not delete them remotely.
+		if isHiddenPath(remote.Path) {
+			continue
+		}
 		// Only reconcile paths inside the walked scope.
 		if filter != "" && !strings.HasPrefix(remote.Path, filter) {
 			continue
@@ -121,6 +132,13 @@ func (s *Service) Push(ctx context.Context, filter string) error {
 		}
 	}
 	return nil
+}
+
+// isHiddenPath reports whether a vault-relative path (forward slashes) is hidden:
+// a dotfile or anything inside a dot-directory (.obsidian, .trash, .git, ...).
+// obgo only syncs notes; hidden files belong to the Obsidian clients / LiveSync.
+func isHiddenPath(p string) bool {
+	return strings.HasPrefix(p, ".") || strings.Contains(p, "/.")
 }
 
 // encodeDocID returns the CouchDB document ID for the given vault-relative path,

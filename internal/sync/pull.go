@@ -57,6 +57,11 @@ func (s *Service) Pull(ctx context.Context, filter string) error {
 		if filter != "" && !strings.HasPrefix(doc.Path, filter) {
 			continue
 		}
+		// Don't pull hidden files to disk (.obsidian, etc.). obgo is notes-only;
+		// hidden config is synced client↔client by the Obsidian LiveSync plugin.
+		if isHiddenPath(doc.Path) {
+			continue
+		}
 		resolved, rerr := s.resolveConflicts(ctx, doc)
 		if rerr != nil {
 			fmt.Fprintf(os.Stderr, "pull: resolve conflicts %q: %v\n", doc.Path, rerr)
