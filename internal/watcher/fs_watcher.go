@@ -153,9 +153,30 @@ func isPathInside(path, dir string) bool {
 	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// isTempName reports whether base looks like an editor/atomic-write temp file
+// that must not be synced. Covers atomic writers that create siblings of the
+// real file (e.g. "note.md.tmp.12345.abcdef" from Claude Code / VS Code),
+// vim swap/backup files, and Chromium ".crswap".
+func isTempName(base string) bool {
+	if strings.HasSuffix(base, "~") {
+		return true
+	}
+	if strings.Contains(base, ".tmp.") || strings.HasSuffix(base, ".tmp") {
+		return true
+	}
+	switch filepath.Ext(base) {
+	case ".swp", ".swx", ".swo", ".crswap":
+		return true
+	}
+	return false
+}
+
 func (w *LocalWatcher) handleEvent(fw *fsnotify.Watcher, event fsnotify.Event) {
 	base := filepath.Base(event.Name)
 	if len(base) > 0 && base[0] == '.' {
+		return
+	}
+	if isTempName(base) {
 		return
 	}
 
