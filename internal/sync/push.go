@@ -134,10 +134,21 @@ func (s *Service) Push(ctx context.Context, filter string) error {
 	return nil
 }
 
-// isHiddenPath reports whether a vault-relative path (forward slashes) is hidden:
-// a dotfile or anything inside a dot-directory (.obsidian, .trash, .git, ...).
-// obgo only syncs notes; hidden files belong to the Obsidian clients / LiveSync.
+// isHiddenPath reports whether a vault-relative path (forward slashes) is hidden
+// and therefore owned by the Obsidian clients / LiveSync, not by obgo.
+//
+// Three forms are treated as hidden:
+//   - a dotfile or anything inside a dot-directory (.obsidian, .trash, .git, ...).
+//   - Obsidian LiveSync "internal files": their doc path carries an "i:" prefix
+//     (e.g. "i:.obsidian/plugins/foo/main.js"). This is how the Hidden File Sync
+//     feature stores config; without this check reconcile would tombstone them.
+//   - the "i:" prefix stripped, in case the remainder is itself a dotpath.
+//
+// obgo only syncs notes; it must never create, pull, or tombstone these.
 func isHiddenPath(p string) bool {
+	if strings.HasPrefix(p, "i:") {
+		return true
+	}
 	return strings.HasPrefix(p, ".") || strings.Contains(p, "/.")
 }
 
